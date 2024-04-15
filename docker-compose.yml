@@ -1,0 +1,151 @@
+---
+# Copyright (C) 2022-2024 Peter Mosmans [Go Forward]
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Basic docker-compose file to start a GitLab demo network
+# Part of https://github.com/PeterMosmans/gitlab-demolab
+
+version: "3.5"
+
+# All services need to be part of the same network for communication
+networks:
+  default:
+    name: ${DEMO_NAME}-network
+
+# Volumes survive reboots and restarts
+volumes:
+  dependency-track:
+    name: ${DEMO_NAME}-dependency-track
+  gitlab_config:
+    name: ${DEMO_NAME}-gitlab_config
+  gitlab_data:
+    name: ${DEMO_NAME}-gitlab_data
+  gitlab_logs:
+    name: ${DEMO_NAME}-gitlab_logs
+  gitlab_runner_config_1:
+    name: ${DEMO_NAME}-gitlab_runner_config_1
+  gitlab_runner_config_2:
+    name: ${DEMO_NAME}-gitlab_runner_config_2
+  runner_cache:
+    name: ${DEMO_NAME}-runner_cache
+    labels:
+      net.go-forward.description: "Shared cache amongst GitLab runners"
+  sonarqube_config:
+    name: ${DEMO_NAME}-sonarqube_config
+  sonarqube_data:
+    name: ${DEMO_NAME}-sonarqube_data
+  sonarqube_extensions:
+    name: ${DEMO_NAME}-sonarqube_extensions
+  sonarqube_logs:
+    name: ${DEMO_NAME}-sonarqube_logs
+  sonarqube_temp:
+    name: ${DEMO_NAME}-sonarqube_temp
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+
+services:
+  # The GitLab instance
+  gitlab:
+    container_name: ${DEMO_NAME}-gitlab
+    environment:
+      # These settings will be evaluated on load - see
+      # https://docs.gitlab.com/omnibus/docker/#pre-configure-docker-container
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://${GITLAB_HOSTNAME}:${GITLAB_PORT}/'
+        gitlab_rails['initial_root_password'] = '${GITLAB_PASSWORD}'
+        gitlab_rails['rack_attack_git_basic_auth'] = {
+        'enabled' => true,
+        'ip_whitelist' => ['127.0.0.1'],
+        'maxretry' => 10,
+        'findtime' => 60,
+        'bantime' => 3600
+        }
+        gitlab_rails['time_zone'] = 'Europe/Amsterdam'
+        gitlab_rails['usage_ping_enabled'] = false
+        letsencrypt['enable'] = false
+        nginx['listen_https'] = false
+        nginx['client_max_body_size'] = '0'
+        puma['port'] = 3456
+        prometheus_monitoring['enable'] = false
+      GITLAB_POST_RECONFIGURE_SCRIPT: /etc/gitlab/post-reconfigure.sh
+    hostname: gitlab
+    image: gitlab/gitlab-ce:${GITLAB_VERSION}
+    ports:
+      # GitLab reads the nginx port number from external_url
+      - "127.0.0.1:${GITLAB_PORT}:${GITLAB_PORT}"
+      - "127.0.0.1:${GITLAB_SSH}:22"
+    restart: unless-stopped
+    shm_size: "256m"
+    stop_grace_period: 10m
+    volumes:
+      - gitlab_config:/etc/gitlab
+      - gitlab_data:/var/opt/gitlab
+      - gitlab_logs:/var/log/gitlab
+      - ./gitlab-post-reconfigure.sh:/etc/gitlab/post-reconfigure.sh:ro
+
+  # The runners
+  gitlab-runner-1:
+    container_name: ${DEMO_NAME}-gitlab-runner-1
+    depends_on:
+      - gitlab
+    hostname: gitlab-runner
+    image: gitlab/gitlab-runner:latest
+    restart: unless-stopped
+    volumes:
+      - gitlab_runner_config_1:/etc/gitlab-runner
+      - /var/run/docker.sock:/var/run/docker.sock
+      - runner_cache:/srv/cache:z
+
+  gitlab-runner-2:
+    container_name: ${DEMO_NAME}-gitlab-runner-2
+    depends_on:
+      - gitlab
+    hostname: gitlab-runner-2
+    image: gitlab/gitlab-runner:latest
+    restart: unless-stopped
+    volumes:
+      - gitlab_runner_config_2:/etc/gitlab-runner
+      - /var/run/docker.sock:/var/run/docker.sock
+      - runner_cache:/srv/cache:z
+
+  # SonarQube
+  sonarqube:
+    container_name: ${DEMO_NAME}-sonarqube
+    image: sonarqube:${SONARQUBE_VERSION}
+    ports:
+      - "127.0.0.1:${SONARQUBE_PORT}:9000"
+    restart: unless-stopped
+    stop_grace_period: 10m
+    volumes:
+      - sonarqube_config:/opt/sonarqube/conf
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+      - sonarqube_temp:/opt/sonarqube/temp
+
+  # Dependency-Track web interface
+  dtrack-frontend:
+    image: dependencytrack/frontend:${DTRACK_FRONTEND_VERSION}
+    depends_on:
+      - dtrack-apiserver
+    environment:
+      - API_BASE_URL=http://${DTRACK_HOSTNAME}:${DTRACK_API_PORT}
+    ports:
+      - "127.0.0.1:${DTRACK_FRONTEND_PORT}:8080"
+    restart: unless-stopped
+
+  # Dependency-Track API server
+  dtrack-apiserver:
+    image: dependencytrack/apiserver:${DTRACK_API_VERSION}
+    deploy:
+      resources:
+        limits:
+          memory: 12288m
+        reservations:
+          memory: 8192m
+    ports:
+      - "127.0.0.1:${DTRACK_API_PORT}:8080"
+    volumes:
+      - dependency-track:/data
+    restart: unless-stopped
